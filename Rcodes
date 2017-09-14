@@ -1,0 +1,588 @@
+library(survival)
+library(glmnet)
+library(stats)
+library(Hmisc)
+library(survcomp)
+############################   Show Time!!!  ##################################
+#取原始特征中ICC>0.8的
+icc_table<-read.csv("C:\\Users\\Administrator\\Desktop\\do直肠癌增强完整数据集\\3rd_test\\ICC_原版.csv")
+index_up0.8<-which(icc_table$value>=0.8) 
+
+set.seed(100)
+sub<-sample(1:nrow(alldata),round(nrow(alldata)*0.5))  #0.667
+data_train<-alldata[sub,]#取1/2的数据做训练集
+data_test<-alldata[-sub,]#取1/2的数据做测试集
+s <- data_train
+s <- na.omit(s) #去掉包含空值NA的行
+Time = as.double(s[,4])
+Status = as.double(s[,3])
+y = Surv( Time,Status)   #==1写不写都行，做cox回归，两者必须是numeric类型
+x <- subset(s[, 5:489],select=index_up0.8) #x只包含特征
+x <- as.matrix(x)            #在console中输入s[,488]查看最后一列的数据
+x <- scale(x, center=T,scale=T) ## z-score
+#################  lasso-cox  ###########
+# standardize = TRUE 表示对（每个特征）每一列进行标准化(standardize)，即对每个列元素减去这一列的均值然后除以这一列的标准差。
+cv.fit<-cv.glmnet(x,y,nfolds=10, family="cox",nlambda = 100, alpha=1)   #默认100次lambda实验
+plot(cv.fit)  #绘制cv变化图
+coef.min = coef(cv.fit, s = "lambda.1se") #指定λ值，抓取出某一个模型的系数:观察不为零的系数
+active.min = which(coef.min != 0)  #选出的特征的标号
+non_0 = coef.min[active.min] #非零系数值
+coef.min  #非零系数和对应协变量
+choose<-names(coef.min [coef.min [,1]!=0,]) #选择的变量名
+g.best <- cv.fit$glmnet.fit #对应的最佳模型
+plot(g.best,xvar="lambda",label=TRUE,cex.main=1.1,lwd=1.6)
+plot(g.best,xvar="lambda",cex.main=1.1,lwd=1.6)
+v.1se = log(cv.fit$lambda.1se)
+abline(v=v.1se,col="paleturquoise4")
+v.min = log(cv.fit$lambda.min)
+abline(v=v.min,col="paleturquoise4")
+
+#############
+prob<-predict(cv.fit,newx=x,s=cv.fit$lambda.1se)#[,1]   #s=cv.fit$lambda.1se  有没有都一样
+radScore.train = prob
+s$score <- radScore.train  #病人打分
+# 在验证集预测
+Time2 = as.double(data_test[,4])
+Status2 = as.double(data_test[,3])
+y2 = Surv( Time2,Status2)
+x2 <- subset(data_test[, 5:489],select=index_up0.8) #x只包含特征
+x2 <- as.matrix(x2)            #在console中输入s[,488]查看最后一列的数据
+x2 <- scale(x2, center=T,scale=T)
+prob2<-predict(cv.fit,newx=x2,s=cv.fit$lambda.1se)
+radScore.valdation = prob2
+data_test$score <- radScore.valdation 
+#在训练集建立三个模型
+attach(s)
+f <- coxph(Surv(time,event) ~ score + ypN + MRF,data=s)
+f.c <- coxph(Surv(time,event) ~ ypN + MRF ,data = s)
+f.R <- coxph(Surv(time,event) ~ score ,data = s)
+detach(s)
+# 三个模型在训练集的cindex
+prob.RC_t<-predict(f)
+prob.C_t<-predict(f.c)
+prob.R_t<-predict(f.R)
+# 在验证集cindex
+prob.RC_v<-predict(f,newdata=data_test)
+prob.C_v<-predict(f.c,newdata=data_test)
+prob.R_v<-predict(f.R,newdata =data_test)
+attach(s) #在训练集上比较三个cindex #print(cindex.RCmodel2_t)可输出CI
+cindex.RCmodel2_t <- concordance.index(x=prob.RC_t,surv.time=time,surv.event=event,method = "noether")#$c.index #组合模型
+cindex.Cmodel2_t <- concordance.index(x=prob.C_t,surv.time=time,surv.event=event,method = "noether")#$c.index #临床模型
+cindex.Rmodel2_t <- concordance.index(x=prob.R_t,surv.time=time,surv.event=event,method = "noether")#$c.index #组学模型
+cindex.comp(cindex.RCmodel2_t, cindex.Cmodel2_t) #组合模型和临床模型  p < 0.001
+cindex.comp(cindex.Cmodel2_t, cindex.Rmodel2_t)   
+cindex.comp(cindex.RCmodel2_t, cindex.Rmodel2_t)
+detach(s)
+attach(data_test) #在验证集上比较三个cindex
+cindex.RC_v <- concordance.index(x=prob.RC_v,surv.time=time,surv.event=event,method = "noether")#$c.index #组合模型
+cindex.C_v <- concordance.index(x=prob.C_v,surv.time=time,surv.event=event,method = "noether")#$c.index #临床模型
+cindex.R_v <- concordance.index(x=prob.R_v,surv.time=time,surv.event=event,method = "noether")#$c.index #组学模型
+cindex.comp(cindex.RC_v, cindex.C_v ) #组合模型和临床模型  p < 0.001
+cindex.comp(cindex.C_v , cindex.R_v)   
+cindex.comp(cindex.RC_v, cindex.R_v)
+detach(data_test)
+###### 用IBS评价三个模型（效果很差）
+library(pec)
+attach(data_test)
+Models <- list("clinical-radiologic"=coxph(Surv(time,event)~ypN + MRF,data=data_test,y=TRUE),
+               "radiomic"=coxph(Surv(time,event)~score,data=data_test,y=TRUE),
+               "combined"=coxph(Surv(time,event)~ypN + MRF+score,data=data_test,y=TRUE))
+PredError <- pec(object=Models,
+                 formula=Surv(time,event) ~ score + ypN + MRF,
+                 data=data_test,
+                 exact=TRUE,
+                 cens.model="marginal",
+                 splitMethod="none",
+                 B=0,
+                 verbose=TRUE)  # 输出PredError可以看详细内容（此处很差，不放了）
+print(PredError,times=seq(5,30,5))
+summary(PredError)
+plot(PredError,xlim=c(0,30))
+detach(data_test)
+###### 用iauc评价在训练集评价三个模型
+library(survivalROC)
+attach(s)
+prob.RC_t = as.double(prob.RC_t) #重新转换才能做iAUC
+s$scoreRC<-prob.RC_t  #################################组合模型
+month<-12
+nobs_t <- NROW(s)
+t_y1.RC= survivalROC(Stime=time,
+                   status=event,
+                   marker = scoreRC,
+                   predict.time = month,span = 0.25*nobs_t^(-0.20) )
+t_y3.RC= survivalROC(Stime=time,
+                   status=event,
+                   marker = scoreRC,
+                   predict.time = month*3,span = 0.25*nobs_t^(-0.20) )
+prob.C_t = as.double(prob.C_t) #重新转换才能做iAUC
+s$scoreC<-prob.C_t  #################################临床模型
+t_y1.C= survivalROC(Stime=time,
+                     status=event,
+                     marker = scoreC,
+                     predict.time = month,span = 0.25*nobs_t^(-0.20) )
+t_y3.C= survivalROC(Stime=time,
+                     status=event,
+                     marker = scoreC,
+                     predict.time = month*3,span = 0.25*nobs_t^(-0.20) )
+s$scoreR<-prob.R_t  #################################组学模型
+t_y1.R= survivalROC(Stime=time,
+                    status=event,
+                    marker = scoreR,
+                    predict.time = month,span = 0.25*nobs_t^(-0.20) )
+t_y3.R= survivalROC(Stime=time,
+                    status=event,
+                    marker = scoreR,
+                    predict.time = month*3,span = 0.25*nobs_t^(-0.20) )
+#训练集1年AUC
+dev.new()
+t_y1AUC<-matrix(data=c("t_y1.RC","t_y1.C","t_y1.R",t_y1.RC$AUC,t_y1.C$AUC,t_y1.R$AUC),nrow=3,ncol=2);
+t_y1AUC#显示两个iAUC,并更改下面图释
+plot(t_y1.R$FP,t_y1.R$TP,lwd = 2,type="l",xlab="False Positive Rate",ylab = "True Positive Rate",main="Time-dependent ROC curve",col="green")
+lines(t_y1.RC$FP,t_y1.RC$TP,lwd = 2,col="red",lty=2)
+lines(t_y1.C$FP,t_y1.C$TP,lwd = 2,col="blue",lty=2)
+legend("bottomright",lwd = 2,bty="n",
+       legend = c("combined model:0.845","radiomic model:0.819","clinical-radiologic model:0.677"),
+       col=c("green","red","blue"),lty=c(1,2,3),cex=0.9)
+abline(0,1,lwd = 2)
+#训练集3年AUC
+dev.new()
+t_y3AUC<-matrix(data=c("t_y3.RC","t_y3.C","t_y3.R",t_y3.RC$AUC,t_y3.C$AUC,t_y3.R$AUC),nrow=3,ncol=2);
+t_y3AUC#显示两个iAUC,并更改下面图释
+plot(t_y3.R$FP,t_y3.R$TP,lwd = 2,type="l",xlab="False Positive Rate",ylab = "True Positive Rate",main="Time-dependent ROC curve",col="green")
+lines(t_y3.RC$FP,t_y3.RC$TP,lwd = 2,col="red",lty=2)
+lines(t_y3.C$FP,t_y3.C$TP,lwd = 2,col="blue",lty=2)
+legend("bottomright",lwd = 2,bty="n",
+       legend = c("combined model:0.842","radiomic model:0.838","clinical-radiologic model:0.644"),
+       col=c("green","red","blue"),lty=c(1,2,3),cex=0.9)
+abline(0,1,lwd = 2)
+detach(s)
+###### 用iauc评价在验证集评价三个模型
+prob.RC_v = as.double(prob.RC_v) #重新转换才能做iAUC
+data_test$scoreRC<-prob.RC_v  #################################组合模型
+month<-12
+nobs_v <- NROW(data_test)
+attach(data_test)
+v_y1.RC= survivalROC(Stime=time,
+                     status=event,
+                     marker = scoreRC,
+                     predict.time = month,span = 0.25*nobs_v^(-0.20) )
+v_y3.RC= survivalROC(Stime=time,
+                     status=event,
+                     marker = scoreRC,
+                     predict.time = month*3,span = 0.25*nobs_v^(-0.20) )
+prob.C_v = as.double(prob.C_v) #重新转换才能做iAUC
+data_test$scoreC<-prob.C_v  #################################临床模型
+v_y1.C= survivalROC(Stime=time,
+                    status=event,
+                    marker = scoreC,
+                    predict.time = month,span = 0.25*nobs_v^(-0.20) )
+v_y3.C= survivalROC(Stime=time,
+                    status=event,
+                    marker = scoreC,
+                    predict.time = month*3,span = 0.25*nobs_v^(-0.20) )
+prob.R_v = as.double(prob.R_v) #重新转换才能做iAUC
+data_test$scoreR<-prob.R_v  #################################组学模型
+v_y1.R= survivalROC(Stime=time,
+                    status=event,
+                    marker = scoreR,
+                    predict.time = month,span = 0.25*nobs_v^(-0.20) )
+v_y3.R= survivalROC(Stime=time,
+                    status=event,
+                    marker = scoreR,
+                    predict.time = month*3,span = 0.25*nobs_v^(-0.20) )
+#验证集1年AUC
+dev.new()
+v_y1AUC<-matrix(data=c("v_y1.RC","v_y1.C","v_y1.R",v_y1.RC$AUC,v_y1.C$AUC,v_y1.R$AUC),nrow=3,ncol=2);
+v_y1AUC#显示两个iAUC,并更改下面图释
+plot(v_y1.RC$FP,v_y1.RC$TP,lwd = 2,type="l",xlab="False Positive Rate",ylab = "True Positive Rate",main="Time-dependent ROC curve",col="green")
+lines(v_y1.R$FP,v_y1.R$TP,lwd = 2,col="red",lty=2)
+lines(v_y1.C$FP,v_y1.C$TP,lwd = 2,col="blue",lty=2)
+legend("bottomright",lwd = 2,bty="n",
+       legend = c("combined model:0.737","radiomic model:0.724","clinical-radiologic model:0.538"),
+       col=c("green","red","blue"),lty=c(1,2,3),cex=0.9)
+abline(0,1,lwd = 2)
+#验证集3年AUC
+dev.new()
+v_y3AUC<-matrix(data=c("v_y3.RC","v_y3.C","v_y3.R",v_y3.RC$AUC,v_y3.C$AUC,v_y3.R$AUC),nrow=3,ncol=2);
+v_y3AUC#显示两个iAUC,并更改下面图释
+plot(v_y3.RC$FP,v_y3.RC$TP,lwd = 2,type="l",xlab="False Positive Rate",ylab = "True Positive Rate",main="Time-dependent ROC curve",col="green")
+lines(v_y3.R$FP,v_y3.R$TP,lwd = 2,col="red",lty=2)
+lines(v_y3.C$FP,v_y3.C$TP,lwd = 2,col="blue",lty=2)
+legend("bottomright",lwd = 2,bty="n",
+       legend = c("combined model:0.837","radiomic model:0.827","clinical-radiologic model:0.467"),
+       col=c("green","red","blue"),lty=c(1,2,3),cex=0.9)
+abline(0,1,lwd = 2)
+
+############################
+#在“训练集”上给病人打分。
+score_median<-median(radScore.train, na.rm = FALSE)  #直接用中位数做cutoff
+fenzu<-matrix(0,nrow=dim(radScore.train)[1],ncol=dim(radScore.train)[2])
+fenzu.index<-which(radScore.train>score_median)  #大于中位数的病人，标记为1（high risk）组(factor序为0 1)
+fenzu[fenzu.index]<-1
+s$fenzu<-fenzu  #把分组情况存入原始数据
+# show.n.risk, if TRUE, show the numbers of samples at risk for each time step.
+# 检验高低风险组生存曲线差异,即检验两个存活函数是否有区别.p<0.05 
+survdiff(Surv(s$time,s$event)~s$fenzu, data=s)
+dev.new()
+km.coxph.plot(formula.s=y ~ fenzu, data.s=s,
+              x.label="Time (months)", y.label="Probability of DFS",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0.02, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.001" )
+km.train=survfit(y~fenzu,data=s,se.fit=FALSE, conf.int=.95)
+print(km.train) #中值
+HR_t.lassoCox=hazard.ratio(x=radScore.train, surv.time=s$time, surv.event=s$event)#, weights=weight,strat=strat
+HR_t.lassoCox#显示所有信息
+# 用lambda.1se对应的模型在“验证集”上打分
+fenzu2<-matrix(0,nrow=dim(radScore.valdation)[1],ncol=dim(radScore.valdation)[2])
+fenzu2.index<-which(radScore.valdation>score_median)  
+fenzu2[fenzu2.index]<-1
+data_test$fenzu2<-fenzu2
+survdiff(Surv(data_test$time,data_test$event)~data_test$fenzu2, data=data_test)
+km.coxph.plot(formula.s=y2 ~ fenzu2, data.s=data_test,
+              x.label="Time (months)", y.label="Probability of DFS",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0.02, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.001" )
+km.valdation=survfit(y2~fenzu2,data=data_test,se.fit=FALSE, conf.int=.95)
+print(km.valdation)
+HR_v.lassoCox=hazard.ratio(x=radScore.valdation, surv.time=data_test$time, surv.event=data_test$event)
+HR_v.lassoCox
+
+### 特征的热图 ###
+
+
+
+
+### 筛选临床变量 ###
+attach(alldata)
+H.1=hazard.ratio(x=TRG,surv.time=time, surv.event=event)$p.value
+H.2=hazard.ratio(x=ypT,surv.time=time, surv.event=event)$p.value
+H.3=hazard.ratio(x=ypN,surv.time=time, surv.event=event)$p.value
+H.4=hazard.ratio(x=EMVI,surv.time=time, surv.event=event)$p.value
+H.5=hazard.ratio(x=MRF,surv.time=time, surv.event=event)$p.value
+H.6=hazard.ratio(x=脉管瘤栓,surv.time=time, surv.event=event)$p.value
+H.7=hazard.ratio(x=神经侵犯,surv.time=time, surv.event=event)$p.value
+H.8=hazard.ratio(x=累及齿状线,surv.time=time, surv.event=event)$p.value
+H.9=hazard.ratio(x=新辅助治疗前CEA,surv.time=time, surv.event=event)$p.value
+H.10=hazard.ratio(x=术前新辅助治疗后CEA,surv.time=time, surv.event=event)$p.value
+H.11=hazard.ratio(x=疗前T分期,surv.time=time, surv.event=event)$p.value
+H.12=hazard.ratio(x=疗前N分期,surv.time=time, surv.event=event)$p.value
+H.13=hazard.ratio(x=age,surv.time=time, surv.event=event)$p.value
+library(lattice);library(survival);library(Formula);library(ggplot2);library(Hmisc);library(rms)
+#在全集上将把p<0.05的元素+rad_score 都放入多元cox模型，观察P值
+x.all <- subset(alldata[, 5:489],select=index_up0.8) #x只包含特征
+x.all <- as.matrix(x.all)            #在console中输入s[,488]查看最后一列的数据
+x.all <- scale(x.all, center=T,scale=T) ## z-score
+prob.all <-predict(cv.fit,newx=x.all,s=cv.fit$lambda.1se)#[,1]   #s=cv.fit$lambda.1se  有没有都一样
+alldata$score <- prob.all 
+ff <- cph(Surv(time,event) ~ score + ypT + ypN + MRF + EMVI , surv = TRUE, x = T, y = T,time.inc=3*12, data = alldata)
+detach(alldata)
+
+### 三个模型的nomo图 
+attach(s)
+nomo_f <- cph(Surv(time,event) ~ score + ypN  + MRF , surv = TRUE, x = T, y = T,time.inc=3*12, data =s) #这三个模型用于画nomo
+nomo_f.c <- cph(Surv(time,event) ~ ypN + MRF , surv = TRUE, x = T, y = T,time.inc=3*12, data = s)
+nomo_f.R <- cph(Surv(time,event) ~ score , surv = TRUE, x = T, y = T,time.inc=3*12, data = s)
+score<-as.double(score)
+s$score <- score
+fenzu<-as.double(fenzu)
+s$fenzu <- fenzu
+ddist0 <- datadist(s)
+options(datadist='ddist0')
+surv.prob_f <- Survival(nomo_f) # 构建生存概率函数(组合模型)
+nom_f <- nomogram(nomo_f, fun=list(function(x) surv.prob_f(12, x),function(x) surv.prob_f(36, x)),
+                funlabel=c("1-year Survival Probability","3-year Survival Probability"),lp=F)
+nom_f3 <- nomogram(nomo_f, fun=list(function(x) surv.prob_f(36, x)),
+                  funlabel=c("3-year Survival Probability"),lp=F)
+dev.new()
+plot(nom_f, xfrac=.2)
+plot(nom_f3, xfrac=.2)
+surv.prob_fc <- Survival(nomo_f.c) # 构建生存概率函数(临床模型)
+nom_fc <- nomogram(nomo_f.c, fun=list(function(x) surv.prob_fc(12, x),function(x) surv.prob_fc(36, x)),
+                  funlabel=c("1-year Survival Probability","3-year Survival Probability"),lp=F)
+nom_fc3 <- nomogram(nomo_f.c, fun=list(function(x) surv.prob_fc(36, x)),
+                   funlabel=c("3-year Survival Probability"),lp=F)
+plot(nom_fc, xfrac=.2)
+plot(nom_fc3, xfrac=.2)
+surv.prob_fr <- Survival(nomo_f.R) # 构建生存概率函数(组学模型)
+nom_fr <- nomogram(nomo_f.R, fun=list(function(x) surv.prob_fr(12, x),function(x) surv.prob_fr(36, x)),
+                   funlabel=c("1-year Survival Probability","3-year Survival Probability"),lp=F)
+nom_fr3 <- nomogram(nomo_f.R, fun=list(function(x) surv.prob_fr(36, x)),
+                    funlabel=c("3-year Survival Probability"),lp=F)
+plot(nom_fr, xfrac=.2)
+plot(nom_fr3, xfrac=.2)
+###########在全集分层分析############
+#在全集上给病人高低风险组
+fenzu.all<-matrix(0,nrow=108,ncol=1)
+fenzuall.index<-which(alldata$score>score_median)  #大于中位数的病人，标记为1（high risk）组(factor序为0 1)
+fenzu.all[fenzuall.index]<-1
+alldata$fenzuAll<-fenzu.all
+attach(alldata)
+# ypT
+s.ypT1<-subset(alldata,ypT == 0)
+survdiff(Surv(s.ypT1$time,s.ypT1$event) ~ s.ypT1$fenzuAll, data=s.ypT1)
+km.coxph.plot(formula.s=Surv(s.ypT1$time,s.ypT1$event) ~ s.ypT1$fenzuAll, data.s=s.ypT1,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+s.ypT2<-subset(alldata,ypT>0)
+survdiff(Surv(s.ypT2$time,s.ypT2$event) ~ s.ypT2$fenzuAll, data=s.ypT2)
+km.coxph.plot(formula.s=Surv(s.ypT2$time,s.ypT2$event) ~ s.ypT2$fenzuAll, data.s=s.ypT2,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1),.lwd=c(2,2), show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+# ypN
+s.ypN1<-subset(alldata,ypN==0)
+survdiff(Surv(s.ypN1$time,s.ypN1$event) ~ s.ypN1$fenzuAll, data=s.ypN1)
+km.coxph.plot(formula.s=Surv(s.ypN1$time,s.ypN1$event) ~ s.ypN1$fenzuAll, data.s=s.ypN1,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1),.lwd=c(2,2), show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+s.ypN2<-subset(alldata,ypN>0)
+survdiff(Surv(s.ypN2$time,s.ypN2$event) ~ s.ypN2$fenzuAll, data=s.ypN2)
+km.coxph.plot(formula.s=Surv(s.ypN2$time,s.ypN2$event) ~ s.ypN2$fenzuAll, data.s=s.ypN2,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+# MRF
+s.MRF1<-subset(alldata,MRF==0)
+survdiff(Surv(s.MRF1$time,s.MRF1$event) ~ s.MRF1$fenzuAll, data=s.MRF1)
+km.coxph.plot(formula.s=Surv(s.MRF1$time,s.MRF1$event) ~ s.MRF1$fenzuAll, data.s=s.MRF1,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+s.MRF2<-subset(alldata,MRF>0)
+survdiff(Surv(s.MRF2$time,s.MRF2$event) ~ s.MRF2$fenzuAll, data=s.MRF2)
+km.coxph.plot(formula.s=Surv(s.MRF2$time,s.MRF2$event) ~ s.MRF2$fenzuAll, data.s=s.MRF2,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+# 疗前CEA
+CEAbef.med <- median(alldata$新辅助治疗前CEA, na.rm = FALSE) 
+s.CEAbef1 <- subset(alldata,新辅助治疗前CEA<CEAbef.med)
+survdiff(Surv(s.CEAbef1 $time,s.CEAbef1 $event) ~ s.CEAbef1 $fenzuAll, data=s.CEAbef1 )
+km.coxph.plot(formula.s=Surv(s.CEAbef1$time,s.CEAbef1$event) ~ s.CEAbef1$fenzuAll, data.s=s.CEAbef1,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+s.CEAbef2 <- subset(alldata,新辅助治疗前CEA>=CEAbef.med)
+survdiff(Surv(s.CEAbef2$time,s.CEAbef2$event) ~ s.CEAbef2$fenzuAll, data=s.CEAbef2 )
+km.coxph.plot(formula.s=Surv(s.CEAbef2$time,s.CEAbef2$event) ~ s.CEAbef2$fenzuAll, data.s=s.CEAbef2,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+# 疗后CEA
+CEAaft.med <- median(alldata$术前新辅助治疗后CEA, na.rm = FALSE) 
+s.CEAaft1 <- subset(alldata,术前新辅助治疗后CEA<CEAaft.med )
+survdiff(Surv(s.CEAaft1$time,s.CEAaft1$event) ~ s.CEAaft1$fenzuAll, data=s.CEAaft1)
+km.coxph.plot(formula.s=Surv(s.CEAaft1$time,s.CEAaft1$event) ~ s.CEAaft1$fenzuAll, data.s=s.CEAaft1,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+s.CEAaft2 <- subset(alldata,术前新辅助治疗后CEA>=CEAaft.med)
+survdiff(Surv(s.CEAaft2$time,s.CEAaft2$event) ~ s.CEAaft2$fenzuAll, data=s.CEAaft2 )
+km.coxph.plot(formula.s=Surv(s.CEAaft2$time,s.CEAaft2$event) ~ s.CEAaft2$fenzuAll, data.s=s.CEAaft2,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+# 疗前T分期
+Tbef.med <- median(alldata$疗前T分期, na.rm = FALSE) 
+s.Tbef1 <- subset(alldata,疗前T分期<=Tbef.med)
+survdiff(Surv(s.Tbef1$time,s.Tbef1$event) ~ s.Tbef1$fenzuAll, data=s.Tbef1 )
+km.coxph.plot(formula.s=Surv(s.Tbef1$time,s.Tbef1$event) ~ s.Tbef1$fenzuAll, data.s=s.Tbef1,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+s.Tbef2 <- subset(alldata,疗前T分期>Tbef.med)
+survdiff(Surv(s.Tbef2$time,s.Tbef2$event) ~s.Tbef2$fenzuAll, data=s.Tbef2)
+km.coxph.plot(formula.s=Surv(s.Tbef2$time,s.Tbef2$event) ~ s.Tbef2$fenzuAll, data.s=s.Tbef2,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+# 疗前T分期 重跑 <=2  >2 ||| 
+s.Tbef1 <- subset(alldata,疗前T分期<=2)
+survdiff(Surv(s.Tbef1$time,s.Tbef1$event) ~ s.Tbef1$fenzuAll, data=s.Tbef1 )
+km.coxph.plot(formula.s=Surv(s.Tbef1$time,s.Tbef1$event) ~ s.Tbef1$fenzuAll, data.s=s.Tbef1,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+s.Tbef2 <- subset(alldata,疗前T分期>2&疗前T分期<=4)
+survdiff(Surv(s.Tbef2$time,s.Tbef2$event) ~s.Tbef2$fenzuAll, data=s.Tbef2)
+km.coxph.plot(formula.s=Surv(s.Tbef2$time,s.Tbef2$event) ~ s.Tbef2$fenzuAll, data.s=s.Tbef2,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+s.Tbef3 <- subset(alldata,疗前T分期>4)
+survdiff(Surv(s.Tbef3$time,s.Tbef3$event) ~s.Tbef3$fenzuAll, data=s.Tbef3)
+km.coxph.plot(formula.s=Surv(s.Tbef3$time,s.Tbef3$event) ~ s.Tbef3$fenzuAll, data.s=s.Tbef3,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+
+
+
+
+
+
+
+
+# 疗前N分期  
+Nbef.med <- median(alldata$疗前N分期, na.rm = FALSE) 
+s.Nbef1 <- subset(alldata,疗前N分期<=Nbef.med)
+survdiff(Surv(s.Nbef1$time,s.Nbef1$event) ~ s.Nbef1$fenzuAll, data=s.Nbef1 )
+km.coxph.plot(formula.s=Surv(s.Nbef1$time,s.Nbef1$event) ~ s.Nbef1$fenzuAll, data.s=s.Nbef1,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+s.Nbef2 <- subset(alldata,疗前N分期>Nbef.med)
+survdiff(Surv(s.Nbef2 $time,s.Nbef2 $event) ~s.Nbef2 $fenzuAll, data=s.Nbef2 )
+km.coxph.plot(formula.s=Surv(s.Nbef2 $time,s.Nbef2 $event) ~ s.Nbef2 $fenzuAll, data.s=s.Nbef2 ,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+
+# 疗前N分期 按照0 和非0重跑
+s.Nbef1 <- subset(alldata,疗前N分期==0)
+survdiff(Surv(s.Nbef1$time,s.Nbef1$event) ~ s.Nbef1$fenzuAll, data=s.Nbef1 )
+km.coxph.plot(formula.s=Surv(s.Nbef1$time,s.Nbef1$event) ~ s.Nbef1$fenzuAll, data.s=s.Nbef1,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+s.Nbef2 <- subset(alldata,疗前N分期>0)
+survdiff(Surv(s.Nbef2 $time,s.Nbef2 $event) ~s.Nbef2 $fenzuAll, data=s.Nbef2 )
+km.coxph.plot(formula.s=Surv(s.Nbef2 $time,s.Nbef2 $event) ~ s.Nbef2 $fenzuAll, data.s=s.Nbef2 ,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+# EMVI
+s.EMVI1<-subset(alldata,EMVI<=2)
+survdiff(Surv(s.EMVI1$time,s.EMVI1$event) ~ s.EMVI1$fenzuAll, data=s.EMVI1)
+km.coxph.plot(formula.s=Surv(s.EMVI1$time,s.EMVI1$event) ~ s.EMVI1$fenzuAll, data.s=s.EMVI1,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1),.lwd=c(2,2), show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+s.EMVI2<-subset(alldata,EMVI>2)
+survdiff(Surv(s.EMVI2$time,s.EMVI2$event) ~ s.EMVI2$fenzuAll, data=s.EMVI2)
+km.coxph.plot(formula.s=Surv(s.EMVI2$time,s.EMVI2$event) ~ s.EMVI2$fenzuAll, data.s=s.EMVI2,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+# age
+s.age1<-subset(alldata,age<=60)
+survdiff(Surv(s.age1$time,s.age1$event) ~ s.age1$fenzuAll, data=s.age1)
+km.coxph.plot(formula.s=Surv(s.age1$time,s.age1$event) ~ s.age1$fenzuAll, data.s=s.age1,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1),.lwd=c(2,2), show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+s.age2<-subset(alldata,age>60)
+survdiff(Surv(s.age2$time,s.age2$event) ~ s.age2$fenzuAll, data=s.age2)
+km.coxph.plot(formula.s=Surv(s.age2$time,s.age2$event) ~ s.age2$fenzuAll, data.s=s.age2,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+
+##################  训练验证集平衡测试   #####################
+#对分类变量做卡方检验，连续变量做t-test（化成分类变量做卡方也可以）
+#MRF该病人是0却写成9，改一下再做
+alldata$MRF[31]<-0
+MRFtest <- xtabs(~whichSet+MRF, data=alldata)　
+chisq.test(MRFtest)
+#对连续变量化为分类变量
+age2<-matrix(0,nrow=108,ncol=1)
+agelowequ60.index<-which(alldata$age<=60)  #找到年龄不大于60的病人，标记为1
+age2[agelowequ60.index,]<-1  
+alldata$age2<-age2
+mytest <- xtabs(~whichSet+age2, data=alldata)　
+chisq.test(mytest)
+befCEA2<-matrix(0,nrow=108,ncol=1)
+befCEA2.index<-which(alldata$新辅助治疗前CEA<=CEAbef.med)  #找到CEA不大于中值的标记为1
+befCEA2[befCEA2.index,]<-1  
+alldata$befCEA2<-befCEA2
+mytest <- xtabs(~whichSet+befCEA2, data=alldata)　
+chisq.test(mytest)
+aftCEA2<-matrix(0,nrow=108,ncol=1)
+aftCEA2.index<-which(alldata$术前新辅助治疗后CEA<=CEAaft.med)  #找到CEA不大于中值的标记为1
+aftCEA2[aftCEA2.index,]<-1  
+alldata$aftCEA2<-aftCEA2
+mytest <- xtabs(~whichSet+aftCEA2, data=alldata)　
+chisq.test(mytest)
+###
+attach(alldata)
+survdiff(Surv(alldata$time,alldata$event) ~ alldata$whichSet,data=alldata)  #俩结果一样,下面有CI
+ha.balance=hazard.ratio(x=whichSet,surv.time=time, surv.event=event)#$p.value
+Time.all = as.double(alldata[,4])
+Status.all = as.double(alldata[,3])
+y.all  = Surv( Time.all ,Status.all )  
+km.all=survfit(y.all ~whichSet,data=alldata,se.fit=FALSE, conf.int=.95)
+print(km.all) #中值
+####  把随机分的训练验证集保存出来。
+setwd("C:\\Users\\Administrator\\Desktop\\do直肠癌增强完整数据集\\3rd_test\\test")
+write.table(alldata,"alldata.csv",sep=",")
+write.table(s,"data_train.csv",sep=",")
+write.table(data_test,"data_test.csv",sep=",")
+
+
+
+
+
+#####去掉II期病人，做一个分层分析
+III.patient<-read.csv("C:\\Users\\Administrator\\Desktop\\do直肠癌增强完整数据集\\3rd_test\\test\\只对III期病人KM.csv")
+attach(III.patient)
+survdiff(Surv(III.patient$time,III.patient$event) ~ III.patient$fenzuAll, data=III.patient)
+km.coxph.plot(formula.s=Surv(III.patient$time,III.patient$event) ~ III.patient$fenzuAll, data.s=III.patient,
+              x.label="Time (months)", y.label="Probability of DFS",leg.bty = "n",
+              main.title="", leg.text=paste(c("Low risk", "High risk"), " ", sep=""),
+              leg.pos="topright", leg.inset=0, .col=c("blue", "red"),
+              .lty=c(1,1), .lwd=c(2,2),show.n.risk=TRUE, n.risk.step=5, n.risk.cex=0.85
+              , verbose=FALSE, o.text="p < 0.01" )
+
+
